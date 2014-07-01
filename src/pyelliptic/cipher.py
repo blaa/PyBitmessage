@@ -21,19 +21,31 @@ class Cipher:
         ctx2 = pyelliptic.Cipher("secretkey", iv, 0, ciphername='aes-256-cfb')
         print ctx2.ciphering(ciphertext)
     """
-    def __init__(self, key, iv, do, ciphername='aes-256-cbc'):
+
+    ENCRYPT = 1
+    DECRYPT = 0
+
+    def __init__(self, key, iv, do, ciphername='aes-256-cbc', padding=True):
         """
         do == 1 => Encrypt; do == 0 => Decrypt
         """
+        assert do in [self.ENCRYPT, self.DECRYPT], "Argument 'do' out of scope"
         self.cipher = OpenSSL.get_cipher(ciphername)
         self.ctx = OpenSSL.EVP_CIPHER_CTX_new()
-        if do == 1 or do == 0:
-            k = OpenSSL.malloc(key, len(key))
-            IV = OpenSSL.malloc(iv, len(iv))
-            OpenSSL.EVP_CipherInit_ex(
-                self.ctx, self.cipher.get_pointer(), 0, k, IV, do)
-        else:
-            raise Exception("RTFM ...")
+
+        keysize = self.cipher.get_keysize()
+        assert keysize is None or len(key) == keysize
+        assert len(iv) == self.cipher.get_blocksize()
+
+        k = OpenSSL.malloc(key, len(key))
+        IV = OpenSSL.malloc(iv, len(iv))
+        OpenSSL.EVP_CipherInit_ex(
+            self.ctx, self.cipher.get_pointer(), 0, k, IV, do)
+
+        if padding is False:
+            # By default PKCS padding is enabled. This case disables it.
+            OpenSSL.EVP_CIPHER_CTX_set_padding(self.ctx, 0)
+
 
     @staticmethod
     def get_all_cipher():
@@ -48,6 +60,11 @@ class Cipher:
         return cipher.get_blocksize()
 
     @staticmethod
+    def get_keysize(ciphername):
+        cipher = OpenSSL.get_cipher(ciphername)
+        return cipher.get_keysize()
+
+    @staticmethod
     def gen_IV(ciphername):
         cipher = OpenSSL.get_cipher(ciphername)
         return OpenSSL.rand(cipher.get_blocksize())
@@ -56,17 +73,21 @@ class Cipher:
         i = OpenSSL.c_int(0)
         buffer = OpenSSL.malloc(b"", len(input) + self.cipher.get_blocksize())
         inp = OpenSSL.malloc(input, len(input))
-        if OpenSSL.EVP_CipherUpdate(self.ctx, OpenSSL.byref(buffer),
-                                    OpenSSL.byref(i), inp, len(input)) == 0:
-            raise Exception("[OpenSSL] EVP_CipherUpdate FAIL ...")
+        if inp is None or buffer is None:
+            raise Exception("Not enough memory")
+
+        ret = OpenSSL.EVP_CipherUpdate(self.ctx, OpenSSL.byref(buffer),
+                                       OpenSSL.byref(i), inp, len(input))
+        if ret == 0:
+            raise Exception("[OpenSSL] EVP_CipherUpdate FAIL: " + str(ret))
         return buffer.raw[0:i.value]
 
     def final(self):
         i = OpenSSL.c_int(0)
         buffer = OpenSSL.malloc(b"", self.cipher.get_blocksize())
-        if (OpenSSL.EVP_CipherFinal_ex(self.ctx, OpenSSL.byref(buffer),
-                                       OpenSSL.byref(i))) == 0:
-            raise Exception("[OpenSSL] EVP_CipherFinal_ex FAIL ...")
+        ret = OpenSSL.EVP_CipherFinal_ex(self.ctx, OpenSSL.byref(buffer), OpenSSL.byref(i))
+        if ret == 0:
+            raise Exception("[OpenSSL] EVP_CipherFinal_ex FAIL: " + str(ret))
         return buffer.raw[0:i.value]
 
     def ciphering(self, input):

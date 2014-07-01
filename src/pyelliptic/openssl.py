@@ -13,13 +13,15 @@ OpenSSL = None
 
 
 class CipherName:
-    def __init__(self, name, pointer, blocksize):
+    def __init__(self, name, pointer, blocksize, keysize):
         self._name = name
         self._pointer = pointer
         self._blocksize = blocksize
+        self._keysize = keysize
 
     def __str__(self):
-        return "Cipher : " + self._name + " | Blocksize : " + str(self._blocksize) + " | Fonction pointer : " + str(self._pointer)
+        return ("Cipher : " + self._name + " | Blocksize : " + str(self._blocksize) +
+                " | Function pointer : " + str(self._pointer))
 
     def get_pointer(self):
         return self._pointer()
@@ -29,6 +31,9 @@ class CipherName:
 
     def get_blocksize(self):
         return self._blocksize
+
+    def get_keysize(self):
+        return self._keysize
 
 
 class _OpenSSL:
@@ -227,6 +232,9 @@ class _OpenSSL:
         self.EVP_CipherFinal_ex.argtypes = [ctypes.c_void_p,
                                             ctypes.c_void_p, ctypes.c_void_p]
 
+        # Symmetric Cipher padding
+        self.EVP_CIPHER_CTX_set_padding = self._lib.EVP_CIPHER_CTX_set_padding
+
         self.EVP_DigestInit = self._lib.EVP_DigestInit
         self.EVP_DigestInit.restype = ctypes.c_int
         self._lib.EVP_DigestInit.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
@@ -289,12 +297,18 @@ class _OpenSSL:
         self.HMAC.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
                               ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
 
+        self.ERR_error_string = self._lib.ERR_error_string
+        self.ERR_peek_last_error = self._lib.ERR_peek_last_error
+
+        self._lib.ERR_load_crypto_strings()
+        self._lib.SSL_load_error_strings()
+
         try:
             self.PKCS5_PBKDF2_HMAC = self._lib.PKCS5_PBKDF2_HMAC
         except:
             # The above is not compatible with all versions of OSX.
             self.PKCS5_PBKDF2_HMAC = self._lib.PKCS5_PBKDF2_HMAC_SHA1
-            
+
         self.PKCS5_PBKDF2_HMAC.restype = ctypes.c_int
         self.PKCS5_PBKDF2_HMAC.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                            ctypes.c_void_p, ctypes.c_int,
@@ -306,17 +320,17 @@ class _OpenSSL:
 
     def _set_ciphers(self):
         self.cipher_algo = {
-            'aes-128-cbc': CipherName('aes-128-cbc', self.EVP_aes_128_cbc, 16),
-            'aes-256-cbc': CipherName('aes-256-cbc', self.EVP_aes_256_cbc, 16),
-            'aes-128-cfb': CipherName('aes-128-cfb', self.EVP_aes_128_cfb128, 16),
-            'aes-256-cfb': CipherName('aes-256-cfb', self.EVP_aes_256_cfb128, 16),
-            'aes-128-ofb': CipherName('aes-128-ofb', self._lib.EVP_aes_128_ofb, 16),
-            'aes-256-ofb': CipherName('aes-256-ofb', self._lib.EVP_aes_256_ofb, 16),
+            'aes-128-cbc': CipherName('aes-128-cbc', self.EVP_aes_128_cbc, 16, 16),
+            'aes-256-cbc': CipherName('aes-256-cbc', self.EVP_aes_256_cbc, 16, 32),
+            'aes-128-cfb': CipherName('aes-128-cfb', self.EVP_aes_128_cfb128, 16, 16),
+            'aes-256-cfb': CipherName('aes-256-cfb', self.EVP_aes_256_cfb128, 16, 32),
+            'aes-128-ofb': CipherName('aes-128-ofb', self._lib.EVP_aes_128_ofb, 16, 16),
+            'aes-256-ofb': CipherName('aes-256-ofb', self._lib.EVP_aes_256_ofb, 16, 32),
             #'aes-128-ctr': CipherName('aes-128-ctr', self._lib.EVP_aes_128_ctr, 16),
             #'aes-256-ctr': CipherName('aes-256-ctr', self._lib.EVP_aes_256_ctr, 16),
-            'bf-cfb': CipherName('bf-cfb', self.EVP_bf_cfb64, 8),
-            'bf-cbc': CipherName('bf-cbc', self.EVP_bf_cbc, 8),
-            'rc4': CipherName('rc4', self.EVP_rc4, 128), # 128 is the initialisation size not block size
+            'bf-cfb': CipherName('bf-cfb', self.EVP_bf_cfb64, 8, 32),
+            'bf-cbc': CipherName('bf-cbc', self.EVP_bf_cbc, 8, 32),
+            'rc4': CipherName('rc4', self.EVP_rc4, 128, 16), # 128 is the initialisation size not block size
         }
 
     def _set_curves(self):
@@ -394,14 +408,15 @@ class _OpenSSL:
         OpenSSL random function
         """
         buffer = self.malloc(0, size)
-        # This pyelliptic library, by default, didn't check the return value of RAND_bytes. It is 
+        # This pyelliptic library, by default, didn't check the return value of RAND_bytes. It is
         # evidently possible that it returned an error and not-actually-random data. However, in
-        # tests on various operating systems, while generating hundreds of gigabytes of random 
+        # tests on various operating systems, while generating hundreds of gigabytes of random
         # strings of various sizes I could not get an error to occur. Also Bitcoin doesn't check
-        # the return value of RAND_bytes either. 
+        # the return value of RAND_bytes either.
         # Fixed in Bitmessage version 0.4.2 (in source code on 2013-10-13)
         while self.RAND_bytes(buffer, size) != 1:
             import time
+            print "WARNING: Reading random bytes failed; waiting for more entropy"
             time.sleep(1)
         return buffer.raw
 
@@ -417,6 +432,20 @@ class _OpenSSL:
         else:
             buffer = self.create_string_buffer(size)
         return buffer
+
+    def get_error_string(self):
+        "Read error description from OpenSSL"
+        buffer = self.malloc('', 120)
+        errno = self.ERR_peek_last_error()
+        if errno == 0:
+            return "No error"
+        print "ERRNO:", errno
+        buffer = self.ERR_error_string(errno, buffer)
+        if isinstance(buffer, int):
+            return "OpenSSL error=%d" % buffer
+        # Got description
+        return buffer.raw
+
 
 try:
     OpenSSL = _OpenSSL('libcrypto.so')
